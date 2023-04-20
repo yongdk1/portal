@@ -49,6 +49,7 @@ import FileModal from "./filemodal";
 import AnnotatorSettings from "./utils/annotatorsettings";
 import FormatTimerSeconds from "./utils/timer";
 import { RegisteredModel } from "./model";
+import TimelineChart from "./timeline";
 
 type Point = [number, number];
 type MapType = L.DrawMap;
@@ -65,6 +66,17 @@ type VideoFrameMetadata = {
   receiveTime: DOMHighResTimeStamp;
   rtpTimestamp: number;
 };
+type Feature = {
+  name: string;
+  confidence: number;
+}
+type FrameData = {
+  timestamp: string;
+  features: Feature[];
+}
+export type ChartData = {
+  [feature: string]: number;
+}
 
 /**
  * Enumeration for Existing User Selected Edit Mode
@@ -148,6 +160,9 @@ interface AnnotatorState {
     opacity: number;
   };
   currAnnotationPlaybackId: number;
+  videoFrameData: FrameData[];
+  videoChartData: ChartData[];
+  displayTimeline: boolean;
 }
 
 /**
@@ -246,6 +261,9 @@ export default class Annotator extends Component<
         },
       },
       currAnnotationPlaybackId: 0,
+      videoFrameData: [],
+      videoChartData: [],
+      displayTimeline: false,
     };
 
     this.toaster = new Toaster({}, {});
@@ -304,6 +322,9 @@ export default class Annotator extends Component<
     this.setAnnotationOptions = this.setAnnotationOptions.bind(this);
     this.toggleShowSelected = this.toggleShowSelected.bind(this);
     this.setAnnotatedAssetsHidden = this.setAnnotatedAssetsHidden.bind(this);
+
+    this.handleChartClick = this.handleChartClick.bind(this);
+    this.generateChartData = this.generateChartData.bind(this);
   }
 
   async componentDidMount(): Promise<void> {
@@ -375,6 +396,7 @@ export default class Annotator extends Component<
           this.setState({
             tagInfo,
             advancedSettingsOpen: false,
+            displayTimeline: false,
           });
           if (Object.keys(this.state.tagInfo.tags).length > 0) {
             this.currentTag = 0;
@@ -400,6 +422,7 @@ export default class Annotator extends Component<
           modelHash: undefined,
           tags: {},
         },
+        displayTimeline: false,
       });
       (this.annotationGroup as any).tags = this.state.tagInfo.tags;
     }
@@ -786,6 +809,32 @@ export default class Annotator extends Component<
         this.state.inferenceOptions.iou
       )
         .then(response => {
+          /* Saving timestamped features for display in timeline chart */
+          const frameData: FrameData[] = [];
+          const featureNames: Set<string> = new Set()
+          Object.entries(response.data.frames).forEach(([timestamp, featureList]) => {
+            const features: any[] = featureList as any[];
+            const frameDataItem: FrameData = {timestamp: timestamp, features: []};
+            features.forEach((feature) => {
+              featureNames.add(feature.tag.name);
+              const featureItem: Feature = {
+                name: feature.tag.name, 
+                confidence: feature.confidence,
+              };
+              frameDataItem.features.push(featureItem);
+            })
+            frameData.push(frameDataItem);
+          })
+          this.setState({
+            videoFrameData: frameData,
+          })
+
+          this.generateChartData();
+
+          this.setState({
+            displayTimeline: true,
+          })
+          
           if (this.currentAsset.url === asset.url && singleAnalysis) {
             const videoElement = this.videoOverlay.getElement();
             /**
@@ -951,6 +1000,7 @@ export default class Annotator extends Component<
     /* Set Confidence Value based on Slider moving */
     this.setState({ confidence: value / 100 }, () => {
       this.filterAnnotationVisibility();
+      this.generateChartData();
     });
   };
 
@@ -1170,6 +1220,12 @@ export default class Annotator extends Component<
     console.log("asset", asset.url);
     console.log("currentasset", this.currentAsset.url);
     console.log("single analysis", singleAnalysis);
+
+    if (!isAssetReselection) {
+      this.setState({
+        displayTimeline: false,
+      })
+    }
 
     const currentVideoElement = this.videoOverlay.getElement();
     if (!isAssetReselection) {
@@ -1432,6 +1488,43 @@ export default class Annotator extends Component<
     return toastProps;
   }
 
+  /** 
+   * Handle clicking on the chart 
+   * Seeks to corresponding time in video
+   */
+  private handleChartClick(event: number) : void {
+    const currentVideoElement = this.videoOverlay.getElement();
+    if (currentVideoElement) {
+      currentVideoElement.pause()
+      currentVideoElement.currentTime = event / 1000;
+    }
+  }
+
+  /** 
+   * Generate chart data according to confidence level
+   * Creates an array of timestamps and feature amounts
+   *
+  */
+  private generateChartData(): void {
+    const chartData: ChartData[] = [];
+    this.state.videoFrameData.forEach((frame) => {
+      const chartDataItem: ChartData = {};
+      chartDataItem["timestamp"] = parseInt(frame.timestamp);
+      frame.features.forEach((feature) => {
+        if (feature.confidence >= this.state.confidence) {
+          if (!chartDataItem[feature.name]) {
+            chartDataItem[feature.name] = 0;
+          }
+          chartDataItem[feature.name]++;
+        }
+      })
+      chartData.push(chartDataItem);
+    })
+    this.setState({
+      videoChartData: chartData,
+    })
+  }
+
   /* Hotkey for Quick Annotation Selection */
   public renderHotkeys(): JSX.Element {
     return (
@@ -1583,6 +1676,14 @@ export default class Annotator extends Component<
                 callbacks={{ selectAssetCallback: this.selectAsset }}
                 {...this.props}
               />
+              {/* Should render timeline chart only if currentAsset is a video */}
+              {this.state.displayTimeline ?
+              <TimelineChart 
+                chartData={this.state.videoChartData}
+                featureTags={this.state.tagInfo.tags}
+                onClick = {this.handleChartClick}
+              /> :
+              null} 
             </Card>
           </div>
 
